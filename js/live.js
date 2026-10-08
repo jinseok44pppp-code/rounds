@@ -70,6 +70,7 @@ export class LiveSession {
 
   // Must be called from a user gesture (iOS needs it to unlock audio).
   async start() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch {}
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC();
     const resumeP = this.ctx.resume();

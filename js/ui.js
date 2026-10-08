@@ -62,28 +62,51 @@ export function confirmDialog(title, body, okLabel = '확인', danger = false) {
   });
 }
 
+// Text-to-speech for review phrases (Web Speech API).
+// iPad quirks handled here: silent mode mutes web speech unless the audio session is "playback";
+// cancel() immediately followed by speak() can drop the utterance; "Enhanced/Premium" voices
+// may be listed but not downloaded and then play nothing, so we only pick built-in compact voices.
 let enVoice = null;
 function pickVoice() {
-  const vs = speechSynthesis.getVoices().filter((v) => /^en[-_]/i.test(v.lang));
-  const want = state.settings.accent === 'british' ? /GB/i : /US/i;
-  enVoice =
-    vs.find((v) => want.test(v.lang) && /premium|enhanced|samantha|daniel|ava|alex/i.test(v.name)) ||
-    vs.find((v) => want.test(v.lang)) || vs[0] || null;
+  if (!('speechSynthesis' in window)) return;
+  const want = state.settings.accent === 'british' ? 'en-GB' : 'en-US';
+  const vs = speechSynthesis.getVoices().filter((v) => v.lang.replace('_', '-') === want && v.localService !== false);
+  enVoice = vs.find((v) => v.default) || vs.find((v) => /^(Samantha|Daniel|Karen|Moira)$/i.test(v.name)) ||
+    vs.find((v) => !/enhanced|premium|siri|novelty|bells|bubbles|boing|whisper|zarvox|trinoids|organ|cellos|jester|superstar|bad news|good news|albert|fred|junior|ralph|kathy|wobble/i.test(v.name)) || null;
 }
 if ('speechSynthesis' in window) {
-  speechSynthesis.onvoiceschanged = pickVoice;
+  speechSynthesis.addEventListener?.('voiceschanged', pickVoice);
   pickVoice();
 }
 
+let speakTimer = null;
 export function speak(text) {
   if (!('speechSynthesis' in window)) return toast('이 브라우저는 음성 읽기를 지원하지 않아요.');
-  speechSynthesis.cancel();
-  if (!enVoice) pickVoice();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = state.settings.accent === 'british' ? 'en-GB' : 'en-US';
-  if (enVoice) u.voice = enVoice;
-  u.rate = Math.max(0.6, Math.min(1.1, state.settings.speed || 0.9));
-  speechSynthesis.speak(u);
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+  const synth = window.speechSynthesis;
+  const go = () => {
+    if (!enVoice) pickVoice();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = state.settings.accent === 'british' ? 'en-GB' : 'en-US';
+    if (enVoice) u.voice = enVoice;
+    u.rate = Math.max(0.6, Math.min(1.1, state.settings.speed || 0.9));
+    u.volume = 1;
+    let started = false;
+    u.onstart = () => { started = true; };
+    u.onerror = (e) => { if (e.error !== 'interrupted' && e.error !== 'canceled') toast(`음성 재생 오류: ${e.error}`); };
+    synth.speak(u);
+    if (synth.paused) synth.resume();
+    clearTimeout(speakTimer);
+    speakTimer = setTimeout(() => {
+      if (!started && !synth.speaking) toast('소리가 안 나면 무음 모드와 볼륨을 확인해주세요.', 3500);
+    }, 2500);
+  };
+  if (synth.speaking || synth.pending) {
+    synth.cancel();
+    setTimeout(go, 120);
+  } else {
+    go();
+  }
 }
 
 export const mmss = (sec) => {
