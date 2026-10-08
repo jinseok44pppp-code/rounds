@@ -364,27 +364,26 @@ class CallController {
     }
     this.root.innerHTML = `<div class="call precall"><div class="precall-card analyzing">
       <div class="spinner"></div><h1>${this.isTest ? '레벨을 분석하고 있어요' : '복습 노트를 만들고 있어요'}</h1>
-      <p class="muted">대화 내용${audio ? '과 발음' : ''}을 꼼꼼히 살펴보는 중이에요. 20~40초 정도 걸려요.</p></div></div>`;
+      <p class="muted" data-el="anamsg">대화 내용${audio ? '과 발음' : ''}을 꼼꼼히 살펴보는 중이에요. 20~40초 정도 걸려요.</p></div></div>`;
 
     if (this.isTest) await this.processLevelTest(transcript, audio, durationSec);
     else await this.processSession(transcript, audio, durationSec);
   }
 
+  onRetry() {
+    const el = this.root.querySelector('[data-el=anamsg]');
+    if (el) el.textContent = '서버가 붐벼서 잠시 후 다시 시도하는 중이에요. 조금만 기다려주세요…';
+  }
+
   async processLevelTest(transcript, audio, durationSec) {
-    const s = state.settings;
-    const { system, prompt } = levelEvalRequest(transcript, !!audio);
-    const parts = [{ text: prompt }];
-    if (audio) parts.push({ inlineData: { mimeType: 'audio/wav', data: audio } });
     try {
-      const r = await generateJSON({ apiKey: s.apiKey, model: s.textModel, system, parts });
-      const cefr = LEVEL_INFO[r.cefr] ? r.cefr : 'B1';
-      const test = { id: uid(), date: Date.now(), durationSec, transcript, result: { ...r, cefr } };
-      state.levelTests.push(test);
-      applyLevel(cefr, true);
-      save();
+      const test = await analyzeLevelTest(transcript, audio, durationSec, () => this.onRetry());
       location.hash = `#/level/${test.id}`;
     } catch (e) {
-      this.showRetry(e, () => this.processLevelTest(transcript, audio, durationSec));
+      // Keep the transcript so the test can be re-analyzed later even if this screen is closed.
+      state.pendingTest = { transcript, durationSec, date: Date.now() };
+      save();
+      this.showRetry(e, () => this.processLevelTest(transcript, audio, durationSec), null, true);
     }
   }
 
@@ -397,24 +396,42 @@ class CallController {
     state.sessions.unshift(session);
     save();
     try {
-      await reviewSession(session, audio);
+      await reviewSession(session, audio, () => this.onRetry());
       location.hash = `#/session/${session.id}`;
     } catch (e) {
       this.showRetry(e, () => this.processSession(transcript, audio, durationSec), session.id);
     }
   }
 
-  showRetry(e, retry, sessionId) {
+  showRetry(e, retry, sessionId, isTest) {
     this.root.innerHTML = `<div class="call precall"><div class="precall-card">
       <h1>분석에 실패했어요</h1><p class="muted">${esc(e.message)}</p>
       ${sessionId ? '<p class="tiny muted">대화 기록은 저장됐어요. 나중에 기록 탭에서 다시 분석할 수 있어요.</p>' : ''}
+      ${isTest ? '<p class="tiny muted">테스트 대화는 저장해뒀어요. 이 화면을 닫아도 나중에 다시 분석할 수 있어요.</p>' : ''}
       <div class="row-btns"><a class="btn ghost" href="#/home">홈으로</a><button class="btn primary" data-act="retry">다시 시도</button></div></div></div>`;
     this.root.querySelector('[data-act=retry]').onclick = () => {
       if (sessionId) state.sessions = state.sessions.filter((x) => x.id !== sessionId);
-      this.root.innerHTML = '<div class="call precall"><div class="precall-card analyzing"><div class="spinner"></div><h1>다시 분석하는 중…</h1></div></div>';
+      this.root.innerHTML = '<div class="call precall"><div class="precall-card analyzing"><div class="spinner"></div><h1>다시 분석하는 중…</h1><p class="muted" data-el="anamsg">잠시만 기다려주세요.</p></div></div>';
       retry();
     };
   }
+}
+
+const analysisModels = () => [state.settings.textModel, state.settings.fastModel];
+
+export async function analyzeLevelTest(transcript, audio, durationSec, onRetry) {
+  const s = state.settings;
+  const { system, prompt } = levelEvalRequest(transcript, !!audio);
+  const parts = [{ text: prompt }];
+  if (audio) parts.push({ inlineData: { mimeType: 'audio/wav', data: audio } });
+  const r = await generateJSON({ apiKey: s.apiKey, model: analysisModels(), system, parts, attempts: 3, onRetry });
+  const cefr = LEVEL_INFO[r.cefr] ? r.cefr : 'B1';
+  const test = { id: uid(), date: Date.now(), durationSec, transcript, result: { ...r, cefr } };
+  state.levelTests.push(test);
+  delete state.pendingTest;
+  applyLevel(cefr, true);
+  save();
+  return test;
 }
 
 export function applyLevel(cefr, fromTest) {
@@ -428,13 +445,13 @@ export function applyLevel(cefr, fromTest) {
 }
 
 // Runs the post-call review; also used by "다시 분석" in history (without audio).
-export async function reviewSession(session, audio = null) {
+export async function reviewSession(session, audio = null, onRetry) {
   const s = state.settings;
   const sc = SCENARIOS.find((x) => x.id === session.scenarioId) || SCENARIOS[0];
   const { system, prompt } = sessionReviewRequest(session.transcript, sc, state.profile, !!audio);
   const parts = [{ text: prompt }];
   if (audio) parts.push({ inlineData: { mimeType: 'audio/wav', data: audio } });
-  const r = await generateJSON({ apiKey: s.apiKey, model: s.textModel, system, parts });
+  const r = await generateJSON({ apiKey: s.apiKey, model: analysisModels(), system, parts, attempts: 3, onRetry });
   session.review = r;
 
   const cards = [];

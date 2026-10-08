@@ -1,7 +1,7 @@
 import { state, save, stats, dueCards, gradeCard, exportData, importData, resetAll } from './store.js';
 import { checkApiKey } from './gemini.js';
 import { SCENARIOS, CATEGORIES, LEVEL_INFO, VOICES, CEFR, START_SPEED } from './prompts.js';
-import { renderCall, stopActiveCall, applyLevel, reviewSession } from './call.js';
+import { renderCall, stopActiveCall, applyLevel, reviewSession, analyzeLevelTest } from './call.js';
 import { esc, icon, toast, confirmDialog, speak, relDate, scoreBars, ring, mmss } from './ui.js';
 
 const root = document.getElementById('view');
@@ -547,10 +547,27 @@ function onboarding(stepArg) {
       <li>${icon('chat')}<div><b>틀려도 괜찮아요</b><span>최대한 길게, 많이 말할수록 정확해요</span></div></li>
       <li>${icon('bulb')}<div><b>막히면 '말문 막힘' 버튼</b><span>말할 거리를 추천해줘요</span></div></li>
     </ul>
-    <a class="btn primary big" href="#/call/level-test">${icon('phone')} 레벨 테스트 시작</a>
+    ${state.pendingTest ? `<div class="card inset pending"><b>분석하지 못한 테스트가 있어요</b>
+      <p class="tiny muted">${relDate(state.pendingTest.date)}에 본 테스트예요. 다시 볼 필요 없이 분석만 다시 할 수 있어요.</p>
+      <button class="btn primary" data-act="reanalyze">${icon('refresh')} 지난 테스트 분석하기</button></div>` : ''}
+    <a class="btn ${state.pendingTest ? 'ghost' : 'primary'} big" href="#/call/level-test">${icon('phone')} 레벨 테스트 ${state.pendingTest ? '새로 보기' : '시작'}</a>
     <details class="skip"><summary>테스트 없이 레벨 직접 고르기</summary>
       <div class="level-pick">${CEFR.map((c) => `<button class="btn ghost" data-c="${c}"><b>${c}</b> ${LEVEL_INFO[c].name}</button>`).join('')}</div>
     </details>`);
+  const re = root.querySelector('[data-act=reanalyze]');
+  if (re) re.onclick = async () => {
+    re.disabled = true;
+    re.textContent = '분석 중… (최대 1분)';
+    const pt = state.pendingTest;
+    try {
+      const test = await analyzeLevelTest(pt.transcript, null, pt.durationSec, () => { re.textContent = '서버가 붐벼서 다시 시도하는 중…'; });
+      location.hash = `#/level/${test.id}`;
+    } catch (err) {
+      toast(err.message, 4000);
+      re.disabled = false;
+      re.innerHTML = `${icon('refresh')} 지난 테스트 분석하기`;
+    }
+  };
   root.querySelector('.level-pick').onclick = (e) => {
     const b = e.target.closest('[data-c]');
     if (!b) return;
